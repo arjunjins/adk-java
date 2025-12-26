@@ -1,4 +1,4 @@
-package com.google.adk.a2a;
+package com.google.adk.a2a.converters;
 
 import com.google.adk.agents.InvocationContext;
 import com.google.adk.events.Event;
@@ -13,7 +13,12 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Converter for ADK Events to A2A Messages. */
+/**
+ * Converter for ADK Events to A2A Messages.
+ *
+ * <p>**EXPERIMENTAL:** Subject to change, rename, or removal in any future patch release. Do not
+ * use in production code.
+ */
 public final class EventConverter {
   private static final Logger logger = LoggerFactory.getLogger(EventConverter.class);
 

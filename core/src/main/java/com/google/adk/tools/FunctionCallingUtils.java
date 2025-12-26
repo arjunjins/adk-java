@@ -104,14 +104,19 @@ public final class FunctionCallingUtils {
       if (ignoreParams.contains(paramName)) {
         continue;
       }
-      required.add(paramName);
+      Annotations.Schema schema = param.getAnnotation(Annotations.Schema.class);
+      if (schema == null || !schema.optional()) {
+        required.add(paramName);
+      }
       properties.put(paramName, buildSchemaFromParameter(param));
     }
     builder.parameters(
         Schema.builder().required(required).properties(properties).type("OBJECT").build());
 
     Type returnType = func.getGenericReturnType();
-    if (returnType != Void.TYPE) {
+    if (returnType == Void.TYPE || returnType == Void.class) {
+      builder.response(Schema.builder().type("NULL").build());
+    } else {
       Type actualReturnType = returnType;
       if (returnType instanceof ParameterizedType parameterizedReturnType) {
         String rawTypeName = ((Class<?>) parameterizedReturnType.getRawType()).getName();

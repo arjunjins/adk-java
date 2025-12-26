@@ -24,11 +24,12 @@ import com.google.adk.agents.Callbacks.BeforeAgentCallback;
 import com.google.adk.events.Event;
 import com.google.adk.plugins.PluginManager;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.errorprone.annotations.DoNotCall;
 import com.google.genai.types.Content;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.Tracer;
-import io.opentelemetry.context.Scope;
+import io.opentelemetry.context.Context;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
@@ -205,39 +206,45 @@ public abstract class BaseAgent {
     Tracer tracer = Telemetry.getTracer();
     return Flowable.defer(
         () -> {
-          Span span = tracer.spanBuilder("agent_run [" + name() + "]").startSpan();
-          try (Scope scope = span.makeCurrent()) {
-            InvocationContext invocationContext = createInvocationContext(parentContext);
+          Span span =
+              tracer
+                  .spanBuilder("agent_run [" + name() + "]")
+                  .setParent(Context.current())
+                  .startSpan();
+          Context spanContext = Context.current().with(span);
 
-            Flowable<Event> executionFlowable =
-                callCallback(
-                        beforeCallbacksToFunctions(
-                            invocationContext.pluginManager(),
-                            beforeAgentCallback.orElse(ImmutableList.of())),
-                        invocationContext)
-                    .flatMapPublisher(
-                        beforeEventOpt -> {
-                          if (invocationContext.endInvocation()) {
-                            return Flowable.fromOptional(beforeEventOpt);
-                          }
+          InvocationContext invocationContext = createInvocationContext(parentContext);
 
-                          Flowable<Event> beforeEvents = Flowable.fromOptional(beforeEventOpt);
-                          Flowable<Event> mainEvents =
-                              Flowable.defer(() -> runAsyncImpl(invocationContext));
-                          Flowable<Event> afterEvents =
-                              Flowable.defer(
-                                  () ->
-                                      callCallback(
-                                              afterCallbacksToFunctions(
-                                                  invocationContext.pluginManager(),
-                                                  afterAgentCallback.orElse(ImmutableList.of())),
-                                              invocationContext)
-                                          .flatMapPublisher(Flowable::fromOptional));
+          return Telemetry.traceFlowable(
+              spanContext,
+              span,
+              () ->
+                  callCallback(
+                          beforeCallbacksToFunctions(
+                              invocationContext.pluginManager(),
+                              beforeAgentCallback.orElse(ImmutableList.of())),
+                          invocationContext)
+                      .flatMapPublisher(
+                          beforeEventOpt -> {
+                            if (invocationContext.endInvocation()) {
+                              return Flowable.fromOptional(beforeEventOpt);
+                            }
 
-                          return Flowable.concat(beforeEvents, mainEvents, afterEvents);
-                        });
-            return executionFlowable.doFinally(span::end);
-          }
+                            Flowable<Event> beforeEvents = Flowable.fromOptional(beforeEventOpt);
+                            Flowable<Event> mainEvents =
+                                Flowable.defer(() -> runAsyncImpl(invocationContext));
+                            Flowable<Event> afterEvents =
+                                Flowable.defer(
+                                    () ->
+                                        callCallback(
+                                                afterCallbacksToFunctions(
+                                                    invocationContext.pluginManager(),
+                                                    afterAgentCallback.orElse(ImmutableList.of())),
+                                                invocationContext)
+                                            .flatMapPublisher(Flowable::fromOptional));
+
+                            return Flowable.concat(beforeEvents, mainEvents, afterEvents);
+                          }));
         });
   }
 
@@ -340,12 +347,16 @@ public abstract class BaseAgent {
     Tracer tracer = Telemetry.getTracer();
     return Flowable.defer(
         () -> {
-          Span span = tracer.spanBuilder("agent_run [" + name() + "]").startSpan();
-          try (Scope scope = span.makeCurrent()) {
-            InvocationContext invocationContext = createInvocationContext(parentContext);
-            Flowable<Event> executionFlowable = runLiveImpl(invocationContext);
-            return executionFlowable.doFinally(span::end);
-          }
+          Span span =
+              tracer
+                  .spanBuilder("agent_run [" + name() + "]")
+                  .setParent(Context.current())
+                  .startSpan();
+          Context spanContext = Context.current().with(span);
+
+          InvocationContext invocationContext = createInvocationContext(parentContext);
+
+          return Telemetry.traceFlowable(spanContext, span, () -> runLiveImpl(invocationContext));
         });
   }
 
@@ -378,5 +389,74 @@ public abstract class BaseAgent {
   public static BaseAgent fromConfig(BaseAgentConfig config, String configAbsPath) {
     throw new UnsupportedOperationException(
         "BaseAgent is abstract. Override fromConfig in concrete subclasses.");
+  }
+
+  /**
+   * Base Builder for all agents.
+   *
+   * @param <B> The concrete builder type.
+   */
+  public abstract static class Builder<B extends Builder<B>> {
+    protected String name;
+    protected String description;
+    protected ImmutableList<BaseAgent> subAgents;
+    protected ImmutableList<BeforeAgentCallback> beforeAgentCallback;
+    protected ImmutableList<AfterAgentCallback> afterAgentCallback;
+
+    /** This is a safe cast to the concrete builder type. */
+    @SuppressWarnings("unchecked")
+    protected B self() {
+      return (B) this;
+    }
+
+    @CanIgnoreReturnValue
+    public B name(String name) {
+      this.name = name;
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B description(String description) {
+      this.description = description;
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B subAgents(List<? extends BaseAgent> subAgents) {
+      this.subAgents = ImmutableList.copyOf(subAgents);
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B subAgents(BaseAgent... subAgents) {
+      this.subAgents = ImmutableList.copyOf(subAgents);
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B beforeAgentCallback(BeforeAgentCallback beforeAgentCallback) {
+      this.beforeAgentCallback = ImmutableList.of(beforeAgentCallback);
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B beforeAgentCallback(List<Callbacks.BeforeAgentCallbackBase> beforeAgentCallback) {
+      this.beforeAgentCallback = CallbackUtil.getBeforeAgentCallbacks(beforeAgentCallback);
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B afterAgentCallback(AfterAgentCallback afterAgentCallback) {
+      this.afterAgentCallback = ImmutableList.of(afterAgentCallback);
+      return self();
+    }
+
+    @CanIgnoreReturnValue
+    public B afterAgentCallback(List<Callbacks.AfterAgentCallbackBase> afterAgentCallback) {
+      this.afterAgentCallback = CallbackUtil.getAfterAgentCallbacks(afterAgentCallback);
+      return self();
+    }
+
+    public abstract BaseAgent build();
   }
 }

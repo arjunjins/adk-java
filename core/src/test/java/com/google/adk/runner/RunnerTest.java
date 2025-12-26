@@ -28,8 +28,13 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.google.adk.Telemetry;
+import com.google.adk.agents.InvocationContext;
+import com.google.adk.agents.LiveRequestQueue;
 import com.google.adk.agents.LlmAgent;
+import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
+import com.google.adk.flows.llmflows.ResumabilityConfig;
 import com.google.adk.models.LlmResponse;
 import com.google.adk.plugins.BasePlugin;
 import com.google.adk.sessions.Session;
@@ -42,10 +47,20 @@ import com.google.common.collect.ImmutableMap;
 import com.google.genai.types.Content;
 import com.google.genai.types.FunctionCall;
 import com.google.genai.types.Part;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.sdk.testing.junit4.OpenTelemetryRule;
+import io.opentelemetry.sdk.trace.data.SpanData;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.subscribers.TestSubscriber;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -53,14 +68,17 @@ import org.mockito.ArgumentCaptor;
 
 @RunWith(JUnit4.class)
 public final class RunnerTest {
+  @Rule public final OpenTelemetryRule openTelemetryRule = OpenTelemetryRule.create();
 
   private final BasePlugin plugin = mockPlugin("test");
   private final Content pluginContent = createContent("from plugin");
   private final TestLlm testLlm = createTestLlm(createLlmResponse(createContent("from llm")));
   private final LlmAgent agent = createTestAgentBuilder(testLlm).build();
-  private final Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+  private final Runner runner =
+      Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
   private final Session session =
       runner.sessionService().createSession("test", "user").blockingGet();
+  private Tracer originalTracer;
 
   private final FailingEchoTool failingEchoTool = new FailingEchoTool();
   private final EchoTool echoTool = new EchoTool();
@@ -88,6 +106,17 @@ public final class RunnerTest {
     BasePlugin plugin = mock(BasePlugin.class, CALLS_REAL_METHODS);
     when(plugin.getName()).thenReturn(name);
     return plugin;
+  }
+
+  @Before
+  public void setUp() {
+    this.originalTracer = Telemetry.getTracer();
+    Telemetry.setTracerForTesting(openTelemetryRule.getOpenTelemetry().getTracer("RunnerTest"));
+  }
+
+  @After
+  public void tearDown() {
+    Telemetry.setTracerForTesting(originalTracer);
   }
 
   @Test
@@ -129,7 +158,12 @@ public final class RunnerTest {
     BasePlugin plugin2 = mockPlugin("test2");
     when(plugin2.beforeRunCallback(any())).thenReturn(Maybe.empty());
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin1, plugin2));
+    Runner runner =
+        Runner.builder()
+            .agent(agent)
+            .appName("test")
+            .plugins(ImmutableList.of(plugin1, plugin2))
+            .build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     var events =
         runner
@@ -241,7 +275,8 @@ public final class RunnerTest {
     TestLlm failingTestLlm = createTestLlm(Flowable.error(exception));
     LlmAgent agent = createTestAgentBuilder(failingTestLlm).build();
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+    Runner runner =
+        Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     var events =
         runner.runAsync("user", session.id(), createContent("from user")).toList().blockingGet();
@@ -259,7 +294,8 @@ public final class RunnerTest {
     TestLlm failingTestLlm = createTestLlm(Flowable.error(exception));
     LlmAgent agent = createTestAgentBuilder(failingTestLlm).build();
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+    Runner runner =
+        Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     runner.runAsync("user", session.id(), createContent("from user")).test().assertError(exception);
 
@@ -277,7 +313,8 @@ public final class RunnerTest {
             .tools(ImmutableList.of(failingEchoTool))
             .build();
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+    Runner runner =
+        Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     var events =
         runner.runAsync("user", session.id(), createContent("from user")).toList().blockingGet();
@@ -300,7 +337,8 @@ public final class RunnerTest {
     LlmAgent agent =
         createTestAgentBuilder(testLlmWithFunctionCall).tools(ImmutableList.of(echoTool)).build();
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+    Runner runner =
+        Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     var events =
         runner.runAsync("user", session.id(), createContent("from user")).toList().blockingGet();
@@ -325,7 +363,8 @@ public final class RunnerTest {
             .tools(ImmutableList.of(failingEchoTool))
             .build();
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+    Runner runner =
+        Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     var events =
         runner.runAsync("user", session.id(), createContent("from user")).toList().blockingGet();
@@ -347,7 +386,8 @@ public final class RunnerTest {
             .tools(ImmutableList.of(failingEchoTool))
             .build();
 
-    Runner runner = new InMemoryRunner(agent, "test", ImmutableList.of(plugin));
+    Runner runner =
+        Runner.builder().agent(agent).appName("test").plugins(ImmutableList.of(plugin)).build();
     Session session = runner.sessionService().createSession("test", "user").blockingGet();
     runner
         .runAsync("user", session.id(), createContent("from user"))
@@ -370,7 +410,385 @@ public final class RunnerTest {
     verify(plugin).onEventCallback(any(), any());
   }
 
+  @Test
+  public void runAsync_withStateDelta_mergesStateIntoSession() {
+    ImmutableMap<String, Object> stateDelta = ImmutableMap.of("key1", "value1", "key2", 42);
+
+    var events =
+        runner
+            .runAsync(
+                "user",
+                session.id(),
+                createContent("test message"),
+                RunConfig.builder().build(),
+                stateDelta)
+            .toList()
+            .blockingGet();
+
+    // Verify agent runs successfully
+    assertThat(simplifyEvents(events)).containsExactly("test agent: from llm");
+
+    // Verify state was merged into session
+    Session finalSession =
+        runner
+            .sessionService()
+            .getSession("test", "user", session.id(), Optional.empty())
+            .blockingGet();
+    assertThat(finalSession.state()).containsAtLeastEntriesIn(stateDelta);
+  }
+
+  @Test
+  public void runAsync_withEmptyStateDelta_doesNotModifySession() {
+    ImmutableMap<String, Object> emptyStateDelta = ImmutableMap.of();
+
+    var events =
+        runner
+            .runAsync(
+                "user",
+                session.id(),
+                createContent("test message"),
+                RunConfig.builder().build(),
+                emptyStateDelta)
+            .toList()
+            .blockingGet();
+
+    assertThat(simplifyEvents(events)).containsExactly("test agent: from llm");
+
+    // Verify no state events were emitted for empty delta
+    Session finalSession =
+        runner
+            .sessionService()
+            .getSession("test", "user", session.id(), Optional.empty())
+            .blockingGet();
+    assertThat(finalSession.state()).isEmpty();
+  }
+
+  @Test
+  public void runAsync_withNullStateDelta_doesNotModifySession() {
+    var events =
+        runner
+            .runAsync(
+                "user",
+                session.id(),
+                createContent("test message"),
+                RunConfig.builder().build(),
+                null)
+            .toList()
+            .blockingGet();
+
+    assertThat(simplifyEvents(events)).containsExactly("test agent: from llm");
+
+    Session finalSession =
+        runner
+            .sessionService()
+            .getSession("test", "user", session.id(), Optional.empty())
+            .blockingGet();
+    assertThat(finalSession.state()).isEmpty();
+  }
+
+  @Test
+  public void runAsync_withStateDelta_attachesStateToUserMessageEvent() {
+    var unused =
+        runner
+            .runAsync(
+                "user",
+                session.id(),
+                createContent("test message"),
+                RunConfig.builder().build(),
+                ImmutableMap.of("testKey", "testValue"))
+            .toList()
+            .blockingGet();
+
+    Session finalSession =
+        runner
+            .sessionService()
+            .getSession("test", "user", session.id(), Optional.empty())
+            .blockingGet();
+
+    // Verify state delta is attached to the user message event, not a separate event
+    Event userEvent =
+        finalSession.events().stream()
+            .filter(
+                e ->
+                    e.author().equals("user")
+                        && e.content().isPresent()
+                        && e.content().get().parts().get().get(0).text().isPresent()
+                        && e.content()
+                            .get()
+                            .parts()
+                            .get()
+                            .get(0)
+                            .text()
+                            .get()
+                            .equals("test message"))
+            .findFirst()
+            .orElseThrow();
+
+    assertThat(userEvent.actions()).isNotNull();
+    assertThat(userEvent.actions().stateDelta()).containsEntry("testKey", "testValue");
+
+    // Verify there is no separate state-only event
+    long stateOnlyEvents =
+        finalSession.events().stream()
+            .filter(
+                e ->
+                    e.author().equals("user")
+                        && e.content().isEmpty()
+                        && e.actions() != null
+                        && !e.actions().stateDelta().isEmpty())
+            .count();
+    assertThat(stateOnlyEvents).isEqualTo(0);
+  }
+
+  @Test
+  public void runAsync_withStateDelta_mergesWithExistingState() {
+    // Create a new session with initial state
+    ConcurrentHashMap<String, Object> initialState = new ConcurrentHashMap<>();
+    initialState.put("existing_key", "existing_value");
+    Session sessionWithState =
+        runner.sessionService().createSession("test", "user", initialState, null).blockingGet();
+
+    // Add new state via stateDelta
+    ImmutableMap<String, Object> newDelta = ImmutableMap.of("new_key", "new_value");
+    var unused =
+        runner
+            .runAsync(
+                "user",
+                sessionWithState.id(),
+                createContent("test message"),
+                RunConfig.builder().build(),
+                newDelta)
+            .toList()
+            .blockingGet();
+
+    // Verify both old and new states are present (merged, not replaced)
+    Session finalSession =
+        runner
+            .sessionService()
+            .getSession("test", "user", sessionWithState.id(), Optional.empty())
+            .blockingGet();
+    assertThat(finalSession.state()).containsEntry("existing_key", "existing_value");
+    assertThat(finalSession.state()).containsEntry("new_key", "new_value");
+  }
+
+  @Test
+  public void beforeRunCallback_seesUserMessageInSession() {
+    ArgumentCaptor<InvocationContext> contextCaptor =
+        ArgumentCaptor.forClass(InvocationContext.class);
+    when(plugin.beforeRunCallback(contextCaptor.capture())).thenReturn(Maybe.empty());
+
+    var unused =
+        runner
+            .runAsync("user", session.id(), createContent("user message for callback"))
+            .toList()
+            .blockingGet();
+
+    // Verify beforeRunCallback was called
+    verify(plugin).beforeRunCallback(any());
+
+    // Verify the context passed to beforeRunCallback contains the session with user message
+    InvocationContext capturedContext = contextCaptor.getValue();
+    Session sessionInCallback = capturedContext.session();
+
+    // Check that the user message is in the session history
+    boolean userMessageFound =
+        sessionInCallback.events().stream()
+            .anyMatch(
+                e ->
+                    e.author().equals("user")
+                        && e.content().isPresent()
+                        && e.content().get().parts().get().get(0).text().isPresent()
+                        && e.content()
+                            .get()
+                            .parts()
+                            .get()
+                            .get(0)
+                            .text()
+                            .get()
+                            .contains("user message for callback"));
+
+    assertThat(userMessageFound).isTrue();
+  }
+
+  @Test
+  public void beforeRunCallback_withStateDelta_seesMergedState() {
+    ArgumentCaptor<InvocationContext> contextCaptor =
+        ArgumentCaptor.forClass(InvocationContext.class);
+    when(plugin.beforeRunCallback(contextCaptor.capture())).thenReturn(Maybe.empty());
+
+    ImmutableMap<String, Object> stateDelta =
+        ImmutableMap.of("callback_key", "callback_value", "number", 123);
+
+    var unused =
+        runner
+            .runAsync(
+                "user",
+                session.id(),
+                createContent("test with state"),
+                RunConfig.builder().build(),
+                stateDelta)
+            .toList()
+            .blockingGet();
+
+    // Verify the context passed to beforeRunCallback has the merged state
+    InvocationContext capturedContext = contextCaptor.getValue();
+    Session sessionInCallback = capturedContext.session();
+
+    // Verify state delta was merged before beforeRunCallback was invoked
+    assertThat(sessionInCallback.state()).containsEntry("callback_key", "callback_value");
+    assertThat(sessionInCallback.state()).containsEntry("number", 123);
+  }
+
   private Content createContent(String text) {
     return Content.builder().parts(Part.builder().text(text).build()).build();
+  }
+
+  @Test
+  public void runAsync_createsInvocationSpan() {
+    var unused =
+        runner.runAsync("user", session.id(), createContent("test message")).toList().blockingGet();
+
+    List<SpanData> spans = openTelemetryRule.getSpans();
+    assertThat(spans).isNotEmpty();
+
+    Optional<SpanData> invocationSpan =
+        spans.stream().filter(span -> Objects.equals(span.getName(), "invocation")).findFirst();
+
+    assertThat(invocationSpan).isPresent();
+    assertThat(invocationSpan.get().hasEnded()).isTrue();
+  }
+
+  @Test
+  public void runLive_success() throws Exception {
+    LiveRequestQueue liveRequestQueue = new LiveRequestQueue();
+    TestSubscriber<Event> testSubscriber =
+        runner.runLive(session, liveRequestQueue, RunConfig.builder().build()).test();
+
+    liveRequestQueue.content(createContent("from user"));
+    liveRequestQueue.close();
+
+    testSubscriber.await();
+    testSubscriber.assertComplete();
+    assertThat(simplifyEvents(testSubscriber.values())).containsExactly("test agent: from llm");
+  }
+
+  @Test
+  public void runLive_withToolExecution() throws Exception {
+    LlmAgent agentWithTool =
+        createTestAgentBuilder(testLlmWithFunctionCall).tools(ImmutableList.of(echoTool)).build();
+    Runner runnerWithTool = Runner.builder().agent(agentWithTool).appName("test").build();
+    Session sessionWithTool =
+        runnerWithTool.sessionService().createSession("test", "user").blockingGet();
+    LiveRequestQueue liveRequestQueue = new LiveRequestQueue();
+    TestSubscriber<Event> testSubscriber =
+        runnerWithTool
+            .runLive(sessionWithTool, liveRequestQueue, RunConfig.builder().build())
+            .test();
+
+    liveRequestQueue.content(createContent("from user"));
+    liveRequestQueue.close();
+
+    testSubscriber.await();
+    testSubscriber.assertComplete();
+    assertThat(simplifyEvents(testSubscriber.values()))
+        .containsExactly(
+            "test agent: FunctionCall(name=echo_tool, args={args_name=args_value})",
+            "test agent: FunctionResponse(name=echo_tool,"
+                + " response={result={args_name=args_value}})",
+            "test agent: done");
+  }
+
+  @Test
+  public void runLive_llmError() throws Exception {
+    Exception exception = new Exception("LLM test error");
+    TestLlm failingTestLlm = createTestLlm(Flowable.error(exception));
+    LlmAgent agent = createTestAgentBuilder(failingTestLlm).build();
+    Runner runner = Runner.builder().agent(agent).appName("test").build();
+    Session session = runner.sessionService().createSession("test", "user").blockingGet();
+    LiveRequestQueue liveRequestQueue = new LiveRequestQueue();
+    TestSubscriber<Event> testSubscriber =
+        runner.runLive(session, liveRequestQueue, RunConfig.builder().build()).test();
+
+    liveRequestQueue.content(createContent("from user"));
+    // No liveRequestQueue.close() here as the LLM throws an error
+
+    testSubscriber.await();
+    testSubscriber.assertError(exception);
+  }
+
+  @Test
+  public void runLive_toolError() throws Exception {
+    LlmAgent agentWithFailingTool =
+        createTestAgentBuilder(testLlmWithFunctionCall)
+            .tools(ImmutableList.of(failingEchoTool))
+            .build();
+    Runner runnerWithFailingTool =
+        Runner.builder().agent(agentWithFailingTool).appName("test").build();
+    Session sessionWithFailingTool =
+        runnerWithFailingTool.sessionService().createSession("test", "user").blockingGet();
+    LiveRequestQueue liveRequestQueue = new LiveRequestQueue();
+    TestSubscriber<Event> testSubscriber =
+        runnerWithFailingTool
+            .runLive(sessionWithFailingTool, liveRequestQueue, RunConfig.builder().build())
+            .test();
+
+    liveRequestQueue.content(createContent("from user"));
+    // No liveRequestQueue.close() here as the tool throws an error
+
+    testSubscriber.await();
+    testSubscriber.assertError(RuntimeException.class);
+    assertThat(simplifyEvents(testSubscriber.values()))
+        .containsExactly("test agent: FunctionCall(name=echo_tool, args={args_name=args_value})");
+  }
+
+  @Test
+  public void runLive_createsInvocationSpan() {
+    LiveRequestQueue liveRequestQueue = new LiveRequestQueue();
+    var unused = runner.runLive(session, liveRequestQueue, RunConfig.builder().build()).test();
+
+    List<SpanData> spans = openTelemetryRule.getSpans();
+    assertThat(spans).isNotEmpty();
+
+    Optional<SpanData> invocationSpan =
+        spans.stream().filter(span -> Objects.equals(span.getName(), "invocation")).findFirst();
+
+    assertThat(invocationSpan).isPresent();
+    assertThat(invocationSpan.get().hasEnded()).isTrue();
+  }
+
+  @Test
+  public void resumabilityConfig_isResumable_isTrueInInvocationContext() {
+    ArgumentCaptor<InvocationContext> contextCaptor =
+        ArgumentCaptor.forClass(InvocationContext.class);
+    when(plugin.beforeRunCallback(contextCaptor.capture())).thenReturn(Maybe.empty());
+    Runner runner =
+        Runner.builder()
+            .agent(agent)
+            .appName("test")
+            .plugins(ImmutableList.of(plugin))
+            .resumabilityConfig(new ResumabilityConfig(true))
+            .build();
+    Session session = runner.sessionService().createSession("test", "user").blockingGet();
+    var unused =
+        runner.runAsync("user", session.id(), createContent("from user")).toList().blockingGet();
+    assertThat(contextCaptor.getValue().isResumable()).isTrue();
+  }
+
+  @Test
+  public void resumabilityConfig_isNotResumable_isFalseInInvocationContext() {
+    ArgumentCaptor<InvocationContext> contextCaptor =
+        ArgumentCaptor.forClass(InvocationContext.class);
+    when(plugin.beforeRunCallback(contextCaptor.capture())).thenReturn(Maybe.empty());
+    Runner runner =
+        Runner.builder()
+            .agent(agent)
+            .appName("test")
+            .plugins(ImmutableList.of(plugin))
+            .resumabilityConfig(new ResumabilityConfig(false))
+            .build();
+    Session session = runner.sessionService().createSession("test", "user").blockingGet();
+    var unused =
+        runner.runAsync("user", session.id(), createContent("from user")).toList().blockingGet();
+    assertThat(contextCaptor.getValue().isResumable()).isFalse();
   }
 }

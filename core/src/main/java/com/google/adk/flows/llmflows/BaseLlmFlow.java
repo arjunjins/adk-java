@@ -43,6 +43,7 @@ import com.google.common.collect.Iterables;
 import com.google.genai.types.FunctionResponse;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Flowable;
@@ -155,36 +156,9 @@ public abstract class BaseLlmFlow implements BaseFlow {
     }
 
     return currentLlmResponse.flatMapPublisher(
-        updatedResponse -> {
-          Flowable<Event> processorEvents = Flowable.fromIterable(Iterables.concat(eventIterables));
-
-          if (updatedResponse.content().isEmpty()
-              && updatedResponse.errorCode().isEmpty()
-              && !updatedResponse.interrupted().orElse(false)
-              && !updatedResponse.turnComplete().orElse(false)) {
-            return processorEvents;
-          }
-
-          Event modelResponseEvent =
-              buildModelResponseEvent(baseEventForLlmResponse, llmRequest, updatedResponse);
-
-          Flowable<Event> modelEventStream = Flowable.just(modelResponseEvent);
-
-          if (modelResponseEvent.functionCalls().isEmpty()) {
-            return processorEvents.concatWith(modelEventStream);
-          }
-
-          Maybe<Event> maybeFunctionCallEvent;
-          if (context.runConfig().streamingMode() == StreamingMode.BIDI) {
-            maybeFunctionCallEvent =
-                Functions.handleFunctionCallsLive(context, modelResponseEvent, llmRequest.tools());
-          } else {
-            maybeFunctionCallEvent =
-                Functions.handleFunctionCalls(context, modelResponseEvent, llmRequest.tools());
-          }
-
-          return processorEvents.concatWith(modelEventStream).concatWith(maybeFunctionCallEvent);
-        });
+        updatedResponse ->
+            buildPostprocessingEvents(
+                updatedResponse, eventIterables, context, baseEventForLlmResponse, llmRequest));
   }
 
   /**
@@ -214,7 +188,10 @@ public abstract class BaseLlmFlow implements BaseFlow {
               return Flowable.defer(
                       () -> {
                         Span llmCallSpan =
-                            Telemetry.getTracer().spanBuilder("call_llm").startSpan();
+                            Telemetry.getTracer()
+                                .spanBuilder("call_llm")
+                                .setParent(Context.current())
+                                .startSpan();
 
                         try (Scope scope = llmCallSpan.makeCurrent()) {
                           return llm.generateContent(
@@ -227,7 +204,7 @@ public abstract class BaseLlmFlow implements BaseFlow {
                                           .runOnModelErrorCallback(
                                               new CallbackContext(
                                                   context, eventForCallbackUsage.actions()),
-                                              llmRequest,
+                                              llmRequestBuilder,
                                               exception)
                                           .switchIfEmpty(Single.error(exception))
                                           .toFlowable())
@@ -235,7 +212,10 @@ public abstract class BaseLlmFlow implements BaseFlow {
                                   llmResp -> {
                                     try (Scope innerScope = llmCallSpan.makeCurrent()) {
                                       Telemetry.traceCallLlm(
-                                          context, eventForCallbackUsage.id(), llmRequest, llmResp);
+                                          context,
+                                          eventForCallbackUsage.id(),
+                                          llmRequestBuilder.build(),
+                                          llmResp);
                                     }
                                   })
                               .doOnError(
@@ -265,7 +245,7 @@ public abstract class BaseLlmFlow implements BaseFlow {
     CallbackContext callbackContext = new CallbackContext(context, callbackEvent.actions());
 
     Maybe<LlmResponse> pluginResult =
-        context.pluginManager().runBeforeModelCallback(callbackContext, llmRequestBuilder.build());
+        context.pluginManager().runBeforeModelCallback(callbackContext, llmRequestBuilder);
 
     LlmAgent agent = (LlmAgent) context.agent();
 
@@ -471,7 +451,10 @@ public abstract class BaseLlmFlow implements BaseFlow {
                       : Completable.defer(
                           () -> {
                             Span sendDataSpan =
-                                Telemetry.getTracer().spanBuilder("send_data").startSpan();
+                                Telemetry.getTracer()
+                                    .spanBuilder("send_data")
+                                    .setParent(Context.current())
+                                    .startSpan();
                             try (Scope scope = sendDataSpan.makeCurrent()) {
                               return connection
                                   .sendHistory(llmRequestAfterPreprocess.contents())
@@ -616,6 +599,45 @@ public abstract class BaseLlmFlow implements BaseFlow {
    *
    * @return A fully constructed {@link Event} representing the LLM response.
    */
+  private Flowable<Event> buildPostprocessingEvents(
+      LlmResponse updatedResponse,
+      List<Iterable<Event>> eventIterables,
+      InvocationContext context,
+      Event baseEventForLlmResponse,
+      LlmRequest llmRequest) {
+    Flowable<Event> processorEvents = Flowable.fromIterable(Iterables.concat(eventIterables));
+    if (updatedResponse.content().isEmpty()
+        && updatedResponse.errorCode().isEmpty()
+        && !updatedResponse.interrupted().orElse(false)
+        && !updatedResponse.turnComplete().orElse(false)) {
+      return processorEvents;
+    }
+
+    Event modelResponseEvent =
+        buildModelResponseEvent(baseEventForLlmResponse, llmRequest, updatedResponse);
+    if (modelResponseEvent.functionCalls().isEmpty()) {
+      return processorEvents.concatWith(Flowable.just(modelResponseEvent));
+    }
+
+    Maybe<Event> maybeFunctionResponseEvent =
+        context.runConfig().streamingMode() == StreamingMode.BIDI
+            ? Functions.handleFunctionCallsLive(context, modelResponseEvent, llmRequest.tools())
+            : Functions.handleFunctionCalls(context, modelResponseEvent, llmRequest.tools());
+
+    Flowable<Event> functionEvents =
+        maybeFunctionResponseEvent.flatMapPublisher(
+            functionResponseEvent -> {
+              Optional<Event> toolConfirmationEvent =
+                  Functions.generateRequestConfirmationEvent(
+                      context, modelResponseEvent, functionResponseEvent);
+              return toolConfirmationEvent.isPresent()
+                  ? Flowable.just(toolConfirmationEvent.get(), functionResponseEvent)
+                  : Flowable.just(functionResponseEvent);
+            });
+
+    return processorEvents.concatWith(Flowable.just(modelResponseEvent)).concatWith(functionEvents);
+  }
+
   private Event buildModelResponseEvent(
       Event baseEventForLlmResponse, LlmRequest llmRequest, LlmResponse llmResponse) {
     Event.Builder eventBuilder =
@@ -626,14 +648,21 @@ public abstract class BaseLlmFlow implements BaseFlow {
             .errorMessage(llmResponse.errorMessage())
             .interrupted(llmResponse.interrupted())
             .turnComplete(llmResponse.turnComplete())
-            .groundingMetadata(llmResponse.groundingMetadata());
+            .groundingMetadata(llmResponse.groundingMetadata())
+            .avgLogprobs(llmResponse.avgLogprobs())
+            .finishReason(llmResponse.finishReason())
+            .usageMetadata(llmResponse.usageMetadata())
+            .modelVersion(llmResponse.modelVersion());
 
     Event event = eventBuilder.build();
+
+    logger.info("event: {} functionCalls: {}", event, event.functionCalls());
 
     if (!event.functionCalls().isEmpty()) {
       Functions.populateClientFunctionCallId(event);
       Set<String> longRunningToolIds =
           Functions.getLongRunningFunctionCalls(event.functionCalls(), llmRequest.tools());
+      logger.info("longRunningToolIds: {}", longRunningToolIds);
       if (!longRunningToolIds.isEmpty()) {
         event.setLongRunningToolIds(Optional.of(longRunningToolIds));
       }

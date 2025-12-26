@@ -110,3 +110,505 @@ select * from event_content_parts ecp
 delete from  sessions where id ='asasawe11'
 This will take care of deleting from all other table in case needed.
 
+--------------------------------------------------------------------------------
+
+## 🚀 Kafka Consumer for Event Processing
+
+The ADK includes a Kafka consumer service that reads adk events from Kafka and persists them to PostgreSQL database.
+
+### Prerequisites for Kafka Consumer
+
+1. **Environment Variables**: Set the following environment variables:
+   ```bash
+   export DBURL="your_database_url"
+   export DBUSER="your_database_username" 
+   export DBPASSWORD="your_database_password"
+   ```
+
+2. **Kafka Brokers**: Ensure Kafka brokers are running and accessible
+
+3. **Database Tables**: The required tables (`sessions`, `events`, `event_content_parts`) should already exist from the setup above
+
+### Configuration
+
+The consumer reads configuration from `config.ini`:
+```ini
+[production]
+kafkaBrokerAddress=localhost:9092,localhost:9093,localhost:9094
+kafka_topic=adk-event
+kafka_consumer_group=adk-event-consumer-group
+```
+
+### Running the Kafka Consumer
+
+#### Method 1: Using Maven Exec Plugin (Recommended)
+```bash
+cd /path/to/adk-java
+mvn exec:java -Dexec.mainClass="com.google.adk.kafka.consumer.KafkaConsumerRunner" -pl core
+```
+
+#### Method 2: With Custom Configuration
+```bash
+cd /path/to/adk-java
+mvn exec:java -Dexec.mainClass="com.google.adk.kafka.consumer.KafkaConsumerRunner" -pl core -Dexec.args="/path/to/config.ini production"
+```
+
+#### Method 3: Compile and Run JAR
+```bash
+# Compile the project
+cd /path/to/adk-java
+mvn clean compile -pl core
+
+# Run the compiled classes
+java -cp "core/target/classes:core/target/dependency/*" com.google.adk.kafka.consumer.KafkaConsumerRunner
+```
+
+### What the Consumer Does
+
+1. **Connects** to Kafka brokers specified in config
+2. **Subscribes** to the `adk-event` topic
+3. **Processes** incoming messages with `business_event = "adk-event"`
+4. **Stores** data in PostgreSQL:
+   - Session data in `sessions` table
+   - Event data in `events` table  
+   - Event content parts in `event_content_parts` table
+5. **Handles** errors gracefully and continues processing
+6. **Logs** all activities and errors
+
+### Expected Output
+
+When running successfully, you should see logs like:
+```
+[INFO] Starting Kafka Consumer Runner...
+[INFO] Loading properties from: /path/to/adk-java/core/config.ini with environment: production
+[INFO] Kafka consumer configuration loaded - Broker: localhost:9092,localhost:9093,localhost:9094, Topic: self_help_chat_events, Group: adk-event-consumer-group
+[INFO] Consumer service initialized: KafkaConsumerService{broker='localhost:9092,localhost:9093,localhost:9094', topic='self_help_chat_events', group='adk-event-consumer-group', running=false}
+[INFO] Kafka consumer service started successfully
+[INFO] Kafka consumer is running. Press Ctrl+C to stop.
+[INFO] Starting Kafka consumer loop
+```
+
+### Stopping the Consumer
+
+- Press `Ctrl+C` to gracefully stop the consumer
+- The consumer will finish processing current messages and then stop
+
+### Troubleshooting
+
+1. **Properties not loaded**: Ensure `config.ini` exists and is readable
+2. **Database connection failed**: Check environment variables and database connectivity
+3. **Kafka connection failed**: Verify Kafka brokers are running and accessible
+4. **JSON parsing errors**: Check that incoming messages match expected format
+
+### Monitoring
+
+The consumer logs all activities including:
+- Message processing success/failure
+- Database operations
+- Configuration loading
+- Error conditions
+
+Check the logs to monitor consumer health and performance.
+
+### Kafka Consumer Architecture
+
+```
+Kafka Topic (adk_event)
+    ↓
+KafkaConsumerService
+    ↓
+KafkaEventRepository
+    ↓
+PostgreSQL Database
+    ├── sessions table
+    ├── events table
+    └── event_content_parts table
+```
+
+The consumer processes events in real-time and maintains data consistency across all three database tables.
+
+--------------------------------------------------------------------------------
+
+## 🏗️ Multi-Tier Architecture Support
+
+The ADK supports a multi-tier architecture with optional Redis caching and Kafka event streaming capabilities.
+
+### Architecture Overview
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Application   │    │   PostgreSQL    │    │     Redis       │
+│                 │───▶│   Database      │    │     Cache        │
+│                 │    │                 │    │                 │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Kafka Event   │    │   Event Data    │    │   Fast Session  │
+│   Streaming     │    │   Persistence   │    │   Retrieval     │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+### Redis Caching Layer
+
+Redis provides fast session caching for improved performance:
+
+**Configuration:**
+```ini
+[production]
+use_redis=true
+redis_uri=redis://localhost:6379
+```
+
+**Benefits:**
+- **Fast Session Retrieval**: Cached sessions reduce database load
+- **Scalability**: Handle high-frequency session access
+- **Performance**: Sub-millisecond response times for cached data
+
+**How it works:**
+1. Session data is written to both PostgreSQL and Redis
+2. Frequent reads are served from Redis cache
+3. Cache miss falls back to PostgreSQL database
+4. Automatic cache invalidation on session updates
+
+### Kafka Event Streaming
+
+Kafka enables real-time event streaming for downstream consumers:
+
+**Configuration:**
+```ini
+[production]
+use_kafka=true
+kafkaBrokerAddress=localhost:9092,localhost:9093,localhost:9094
+kafkaTopic=adk-event
+```
+
+**Benefits:**
+- **Real-time Processing**: Events are streamed immediately
+- **Decoupling**: Downstream systems can process events independently
+- **Scalability**: Handle high-volume event streams
+- **Reliability**: Message persistence and delivery guarantees
+
+**Event Flow:**
+1. Session events are captured in real-time
+2. Events are published to Kafka topics
+3. Multiple consumers can process events independently
+4. Event processing is asynchronous and non-blocking
+
+### Configuration Options
+
+**Full Multi-Tier Setup:**
+```ini
+[production]
+# Database
+db_url=jdbc:postgresql://localhost:5432/adk_db
+db_user=postgres
+db_password=postgres
+
+# Redis Caching
+use_redis=true
+redis_uri=redis://localhost:6379
+
+# Kafka Streaming
+use_kafka=true
+kafkaBrokerAddress=localhost:9092,localhost:9093,localhost:9094
+kafkaTopic=adk-event
+
+# Consumer Configuration
+kafka_topic=adk-event
+kafka_consumer_group=adk-event-consumer-group
+```
+
+**PostgreSQL Only (Minimal Setup):**
+```ini
+[production]
+# Database only
+db_url=jdbc:postgresql://localhost:5432/adk_db
+db_user=postgres
+db_password=postgres
+
+# Disable optional features
+use_redis=false
+use_kafka=false
+```
+
+### Performance Benefits
+
+| Feature | PostgreSQL Only | With Redis | With Kafka | Full Stack |
+|---------|------------------|------------|------------|------------|
+| Session Read | ~10ms | ~1ms | ~10ms | ~1ms |
+| Session Write | ~5ms | ~5ms | ~5ms | ~5ms |
+| Event Processing | Synchronous | Synchronous | Asynchronous | Asynchronous |
+| Scalability | Limited | High | High | Very High |
+| Reliability | High | High | High | Very High |
+
+### Use Cases
+
+**Redis Caching:**
+- High-frequency session access
+- Real-time applications
+- Performance-critical systems
+- Reduced database load
+
+**Kafka Streaming:**
+- Event-driven architectures
+- Microservices communication
+- Real-time analytics
+- Audit logging
+- Integration with external systems
+
+**Combined Benefits:**
+- **High Performance**: Fast reads from Redis
+- **Real-time Processing**: Event streaming via Kafka
+- **Data Persistence**: Reliable storage in PostgreSQL
+- **Scalability**: Handle growing workloads
+- **Flexibility**: Enable/disable features as needed
+
+--------------------------------------------------------------------------------
+
+## 📚 Using ADK Core as a Library
+
+The ADK Core module can be used as a dependency in other Java projects. This section explains how to integrate it and handle configuration.
+
+### Maven Dependency
+
+Add the ADK Core dependency to your project's `pom.xml`:
+
+```xml
+<dependency>
+    <groupId>com.google.adk</groupId>
+    <artifactId>google-adk</artifactId>
+    <version>0.3.1-SNAPSHOT</version>
+</dependency>
+```
+
+### Configuration Options
+
+The ADK Core library supports multiple configuration methods for maximum flexibility:
+
+#### Option 1: Configuration File (Recommended)
+
+Place a `config.ini` file in your project's classpath:
+
+**File: `src/main/resources/config.ini`**
+```ini
+[production]
+# Database Configuration
+db_url=jdbc:postgresql://localhost:5432/your_database
+db_user=your_username
+db_password=your_password
+
+# Redis Configuration (Optional)
+use_redis=true
+redis_uri=redis://localhost:6379
+
+# Kafka Configuration (Optional)
+use_kafka=true
+kafkaBrokerAddress=localhost:9092
+kafka_topic=your-topic
+kafka_consumer_group=your-consumer-group
+```
+
+#### Option 2: Environment Variables
+
+Set environment variables in your system or application:
+
+```bash
+# Database
+export DB_URL=jdbc:postgresql://localhost:5432/your_database
+export DB_USER=your_username
+export DB_PASSWORD=your_password
+
+# Redis (Optional)
+export USE_REDIS=true
+export REDIS_URI=redis://localhost:6379
+
+# Kafka (Optional)
+export USE_KAFKA=true
+export KAFKABROKERADDRESS=localhost:9092
+export KAFKA_TOPIC=your-topic
+export KAFKA_CONSUMER_GROUP=your-consumer-group
+```
+
+#### Option 3: System Properties
+
+Set system properties when starting your application:
+
+```bash
+java -Ddb_url=jdbc:postgresql://localhost:5432/your_database \
+     -Ddb_user=your_username \
+     -Ddb_password=your_password \
+     -Duse_redis=true \
+     -Dredis_uri=redis://localhost:6379 \
+     -jar your-application.jar
+```
+
+### Usage Examples
+
+#### Basic Usage with Auto-Configuration
+
+```java
+import com.google.adk.utils.PropertiesHelper;
+import com.google.adk.utils.PostgresDBHelper;
+
+public class MyApplication {
+    public static void main(String[] args) {
+        // The library will automatically try to load config.ini from classpath
+        // or fall back to environment variables
+        PropertiesHelper helper = PropertiesHelper.getInstance();
+        
+        // Use the database helper
+        try {
+            Connection conn = PostgresDBHelper.getInstance().getConnection();
+            // Your database operations here
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+#### Explicit Configuration Loading
+
+```java
+import com.google.adk.utils.PropertiesHelper;
+
+public class MyApplication {
+    public static void main(String[] args) {
+        // Explicitly load configuration
+        PropertiesHelper.loadProperties("config.ini", "production");
+        
+        // Now you can use any ADK components
+        PropertiesHelper helper = PropertiesHelper.getInstance();
+        String dbUrl = helper.getValue("db_url");
+        System.out.println("Database URL: " + dbUrl);
+    }
+}
+```
+
+#### Using Kafka Consumer
+
+```java
+import com.google.adk.kafka.consumer.KafkaConsumerService;
+import com.google.adk.utils.PropertiesHelper;
+
+public class MyKafkaApp {
+    public static void main(String[] args) {
+        // Load configuration
+        PropertiesHelper.loadProperties("config.ini", "production");
+        
+        // Start Kafka consumer
+        KafkaConsumerService consumer = new KafkaConsumerService();
+        consumer.start();
+        
+        // Keep running
+        Runtime.getRuntime().addShutdownHook(new Thread(consumer::stop));
+    }
+}
+```
+
+### Configuration Priority
+
+The library follows this priority order for configuration:
+
+1. **INI File** (if found in classpath or filesystem)
+2. **Environment Variables** (uppercase with underscores)
+3. **System Properties** (as fallback)
+
+### Environment Variable Naming
+
+The library automatically converts property names to environment variable patterns:
+
+| Property Key | Environment Variable Patterns |
+|--------------|------------------------------|
+| `db_url` | `DB_URL`, `DBURL` |
+| `use_redis` | `USE_REDIS`, `USEREDIS` |
+| `kafkaBrokerAddress` | `KAFKABROKERADDRESS`, `KAFKA_BROKER_ADDRESS` |
+
+### Troubleshooting
+
+#### "PropertiesHelper not initialized" Error
+
+This error occurs when the library can't find any configuration. Solutions:
+
+1. **Add config.ini to classpath**: Place `config.ini` in `src/main/resources/`
+2. **Set environment variables**: Export required environment variables
+3. **Explicit initialization**: Call `PropertiesHelper.loadProperties()` before using
+
+#### Configuration Not Found
+
+If your configuration isn't being loaded:
+
+1. **Check file location**: Ensure `config.ini` is in the classpath
+2. **Verify environment variables**: Use `echo $VARIABLE_NAME` to check
+3. **Enable debug logging**: Set log level to DEBUG to see loading attempts
+4. **Check property names**: Ensure property keys match exactly
+
+#### Example Debug Setup
+
+```java
+// Enable debug logging to see configuration loading
+System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "debug");
+
+// Try loading with explicit path
+PropertiesHelper.loadProperties("src/main/resources/config.ini", "production");
+```
+
+### Best Practices
+
+1. **Use configuration files** for development and testing
+2. **Use environment variables** for production deployments
+3. **Validate configuration** at application startup
+4. **Provide sensible defaults** for optional features
+5. **Use the `getValue(key, defaultValue)` method** for optional properties
+
+### Example Complete Setup
+
+**Project Structure:**
+```
+your-project/
+├── pom.xml
+├── src/
+│   └── main/
+│       ├── java/
+│       │   └── com/yourcompany/
+│       │       └── MyApp.java
+│       └── resources/
+│           └── config.ini
+```
+
+**config.ini:**
+```ini
+[production]
+db_url=jdbc:postgresql://localhost:5432/myapp_db
+db_user=myapp_user
+db_password=secure_password
+use_redis=true
+redis_uri=redis://localhost:6379
+```
+
+**MyApp.java:**
+```java
+package com.yourcompany;
+
+import com.google.adk.utils.PropertiesHelper;
+import com.google.adk.utils.PostgresDBHelper;
+
+public class MyApp {
+    public static void main(String[] args) {
+        // Configuration is auto-loaded from classpath
+        PropertiesHelper config = PropertiesHelper.getInstance();
+        
+        // Use ADK components
+        try {
+            Connection conn = PostgresDBHelper.getInstance().getConnection();
+            System.out.println("Connected to database successfully!");
+        } catch (Exception e) {
+            System.err.println("Database connection failed: " + e.getMessage());
+        }
+    }
+}
+```
+
+This setup allows you to use the ADK Core library in any Java project with flexible configuration options.

@@ -34,6 +34,10 @@ public class ReadonlyContext {
     this.invocationContext = invocationContext;
   }
 
+  public InvocationContext getInvocationContext() {
+    return invocationContext;
+  }
+
   /** Returns the user content that initiated this invocation. */
   public Optional<Content> userContent() {
     return invocationContext.userContent();
@@ -52,6 +56,11 @@ public class ReadonlyContext {
   /** Returns the name of the agent currently running. */
   public String agentName() {
     return invocationContext.agent().name();
+  }
+
+  /** Returns the user ID. */
+  public String userId() {
+    return invocationContext.session().userId();
   }
 
   /** Returns the session ID. */

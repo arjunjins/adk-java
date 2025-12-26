@@ -1,8 +1,12 @@
 package com.google.adk.sessions;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.adk.events.Event;
+import com.google.adk.events.EventActions;
+import com.google.adk.redis.RedisConnection;
 import com.google.adk.utils.PostgresDBHelper;
+import com.google.adk.utils.PropertiesHelper;
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.reactivex.rxjava3.core.Completable;
@@ -17,6 +21,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import org.jetbrains.annotations.Nullable;
+import org.json.JSONArray;
 import org.json.JSONObject; // Used for the return type of getSession in the helper
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +30,12 @@ import org.slf4j.LoggerFactory;
 public class PostgresSessionService implements BaseSessionService, AutoCloseable {
   private static final Logger logger = LoggerFactory.getLogger(PostgresSessionService.class);
   private final ObjectMapper objectMapper = new ObjectMapper();
+  private final RedisConnection redisConnection;
+
+  public PostgresSessionService() {
+    String redisUri = PropertiesHelper.getInstance().getValue("redis_uri");
+    this.redisConnection = new RedisConnection(redisUri);
+  }
 
   @SuppressWarnings("null")
   @Override
@@ -103,9 +114,7 @@ public class PostgresSessionService implements BaseSessionService, AutoCloseable
         "Attempting to get session: {} for app: {} and user: {}", sessionId, appName, userId);
 
     try {
-
-      JSONObject storedSessionJson = PostgresDBHelper.getInstance().getSession(sessionId);
-
+      JSONObject storedSessionJson = getSessionFromRedisOrPostgres(sessionId);
       if (storedSessionJson != null) {
         // Deserialize the JSONObject back into a Session object using ObjectMapper
         Session session = objectMapper.readValue(storedSessionJson.toString(), Session.class);
@@ -220,8 +229,9 @@ public class PostgresSessionService implements BaseSessionService, AutoCloseable
     logger.debug("Attempting to append event to session: {}", sessionId);
 
     try {
+      JSONObject sessionJson = getSessionFromRedisOrPostgres(sessionId);
       // Get the latest session state from DB to append event correctly
-      JSONObject sessionJson = PostgresDBHelper.getInstance().getSession(sessionId);
+      // JSONObject sessionJson = PostgresDBHelper.getInstance().getSession(sessionId);
 
       if (sessionJson == null) {
         logger.warn(
@@ -233,16 +243,39 @@ public class PostgresSessionService implements BaseSessionService, AutoCloseable
         if (storedSession.events() != null) {
           // Create a new list with the appended event to avoid mutating the original
           List<Event> updatedEvents = new ArrayList<>(storedSession.events());
+          trimTempDeltaState(event);
           updatedEvents.add(event);
 
-          // Create a new session with updated events and timestamp
+          // Apply state delta from the event to the stored session's state
+          ConcurrentMap<String, Object> updatedState = new ConcurrentHashMap<>();
+          if (storedSession.state() != null) {
+            updatedState.putAll(storedSession.state());
+          }
+
+          // Apply state delta from event actions
+          EventActions actions = event.actions();
+          if (actions != null) {
+            ConcurrentMap<String, Object> stateDelta = actions.stateDelta();
+            if (stateDelta != null && !stateDelta.isEmpty()) {
+              stateDelta.forEach(
+                  (key, value) -> {
+                    if (value == State.REMOVED) {
+                      updatedState.remove(key);
+                    } else {
+                      updatedState.put(key, value);
+                    }                  });
+            }
+          }
+
+          // Create a new session with updated events, updated state, and timestamp
+          Instant now = Instant.now();
           Session updatedSession =
               Session.builder(storedSession.id())
                   .appName(storedSession.appName())
                   .userId(storedSession.userId())
-                  .state(storedSession.state())
+                  .state(updatedState)
                   .events(updatedEvents)
-                  .lastUpdateTime(this.getInstantFromEvent(event))
+                  .lastUpdateTime(now)
                   .build();
 
           /*
@@ -252,8 +285,8 @@ public class PostgresSessionService implements BaseSessionService, AutoCloseable
 
           PostgresDBHelper.getInstance().saveSession(sessionId, updatedSession);
 
-          logger.debug("Event appended successfully to session {}.", sessionId);
-          // Call super implementation if there are additional side effects
+          logger.debug("Event appended successfully to session {} with state updates.", sessionId);
+          // Call super implementation to update the in-memory session object as well
           BaseSessionService.super.appendEvent(session, event);
           return Single.just(event);
         } else {
@@ -292,5 +325,66 @@ public class PostgresSessionService implements BaseSessionService, AutoCloseable
     // For DriverManager, there's no explicit global close.
     // Individual connections are closed by try-with-resources.
     logger.info("PostgresSessionService closing.");
+  }
+
+  /**
+   * Removes temporary state delta keys from the event. Filters out all keys that start with
+   * State.TEMP_PREFIX from the event's actions state delta.
+   *
+   * @param event The event to trim.
+   * @return The event with temporary state delta keys removed.
+   */
+  private void trimTempDeltaState(Event event) {
+    if (event == null || event.actions() == null || event.actions().stateDelta() == null) {
+      return;
+    }
+    ConcurrentMap<String, Object> stateDelta = event.actions().stateDelta();
+    stateDelta.entrySet().removeIf(entry -> entry.getKey().startsWith(State.TEMP_PREFIX));
+  }
+
+  public JSONObject getSessionFromRedisOrPostgres(String sessionId) throws Exception {
+    JSONObject storedSessionJson = null;
+    String redisSessionStr = null;
+    String useRedis = PropertiesHelper.getInstance().getValue("use_redis");
+    if (Boolean.parseBoolean(useRedis)) {
+      redisSessionStr = redisConnection.get(sessionId);
+    }
+    if (redisSessionStr != null && !redisSessionStr.isEmpty()) {
+      JSONObject redisSessionJson = new JSONObject(redisSessionStr);
+      String id = redisSessionJson.getString("id");
+      String appName = redisSessionJson.getString("appName");
+      String userId = redisSessionJson.getString("userId");
+      String stateDataJson = redisSessionJson.getJSONObject("state").toString();
+      Instant lastUpdateTime = Instant.ofEpochSecond(redisSessionJson.getLong("lastUpdateTime"));
+      JSONObject eventJson = new JSONObject(redisSessionJson.getString("event_data"));
+      JSONArray eventArr = new JSONArray(eventJson.getString("events"));
+
+      storedSessionJson = new JSONObject();
+      storedSessionJson.put("id", id);
+      storedSessionJson.put("appName", appName);
+      storedSessionJson.put("userId", userId);
+      storedSessionJson.put("state", new JSONObject(stateDataJson));
+      storedSessionJson.put("events", eventArr);
+      storedSessionJson.put(
+          "lastUpdateTime",
+          (double) lastUpdateTime.getEpochSecond() + lastUpdateTime.getNano() / 1_000_000_000.0);
+    } else {
+      storedSessionJson = PostgresDBHelper.getInstance().getSession(sessionId);
+      /*
+       * If Redis is enabled and the session is not found in Redis, save it to redis cache.
+       */
+      if (Boolean.parseBoolean(useRedis) && (storedSessionJson != null)) {
+        Session session = objectMapper.readValue(storedSessionJson.toString(), Session.class);
+        JSONObject eventJson = new JSONObject();
+        eventJson.put("events", session.events().toString());
+        PostgresDBHelper.getInstance().saveToRedisCache(session, eventJson);
+        logger.debug("Session {} saved to Redis cache.", sessionId);
+      }
+    }
+    return storedSessionJson;
+  }
+
+  private Session deserializeSession(String sessionJsonString) throws Exception {
+    return objectMapper.readValue(sessionJsonString, new TypeReference<Session>() {});
   }
 }
