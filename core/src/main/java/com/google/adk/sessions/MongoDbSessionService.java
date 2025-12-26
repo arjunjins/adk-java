@@ -24,8 +24,8 @@ import org.slf4j.LoggerFactory;
  * @author Harshavardhan A
  *     <p>A MongoDB implementation of {@link BaseSessionService} for persistent storage. Stores
  *     sessions, user state, and app state in a MongoDB collection.
- *     <p>This class is implemented as a singleton to ensure a single MongoDB connection
- *     is shared across all usages. Use {@link #getInstance()} to obtain the singleton instance.
+ *     <p>This class is implemented as a singleton to ensure a single MongoDB connection is shared
+ *     across all usages. Use {@link #getInstance()} to obtain the singleton instance.
  */
 public class MongoDbSessionService implements BaseSessionService, AutoCloseable {
 
@@ -52,8 +52,8 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
   }
 
   /**
-   * Returns the singleton instance of MongoDbSessionService.
-   * The instance is lazily initialized on first access in a thread-safe manner.
+   * Returns the singleton instance of MongoDbSessionService. The instance is lazily initialized on
+   * first access in a thread-safe manner.
    *
    * @return the singleton instance
    */
@@ -62,13 +62,13 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
   }
 
   /** Create connection to the Mongo DB, by fetching the details from Environment */
-  private MongoDbSessionService() {
+  public MongoDbSessionService() {
     initializeMongoClient();
   }
 
   /**
-   * Initializes the static MongoClient if not already created.
-   * Uses double-checked locking for thread-safe lazy initialization.
+   * Initializes the static MongoClient if not already created. Uses double-checked locking for
+   * thread-safe lazy initialization.
    */
   private static void initializeMongoClient() {
     // Double-checked locking for thread-safe singleton connection
@@ -150,11 +150,7 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
     String db = System.getenv(DB);
     String collection = System.getenv(COLLECTION);
     Document document =
-        mongoClient
-            .getDatabase(db)
-            .getCollection(collection)
-            .find(Filters.eq("id", id))
-            .first();
+        mongoClient.getDatabase(db).getCollection(collection).find(Filters.eq("id", id)).first();
     if (document != null) {
       JSONObject session = new JSONObject(document.toJson());
       session.remove("_id");
@@ -181,10 +177,7 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
   private void deleteSession(String sessionId) {
     String db = System.getenv(DB);
     String collection = System.getenv(COLLECTION);
-    mongoClient
-        .getDatabase(db)
-        .getCollection(collection)
-        .deleteOne(Filters.eq("id", sessionId));
+    mongoClient.getDatabase(db).getCollection(collection).deleteOne(Filters.eq("id", sessionId));
   }
 
   /**
