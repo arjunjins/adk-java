@@ -24,13 +24,16 @@ import org.slf4j.LoggerFactory;
  * @author Harshavardhan A
  *     <p>A MongoDB implementation of {@link BaseSessionService} for persistent storage. Stores
  *     sessions, user state, and app state in a MongoDB collection.
+ *     <p>This class is implemented as a singleton to ensure a single MongoDB connection
+ *     is shared across all usages. Use {@link #getInstance()} to obtain the singleton instance.
  */
 public class MongoDbSessionService implements BaseSessionService, AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(MongoDbSessionService.class);
 
-  private MongoClient mongoClient;
-  private MongoDatabase database;
+  // Static MongoClient ensures only ONE connection exists across all instances
+  private static volatile MongoClient mongoClient;
+  private static final Object lock = new Object();
 
   private static final String HOST = "mongo_host"; // MongoDB host
   private static final String PORT = "mongo_port"; // MongoDB port
@@ -40,25 +43,70 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
   private static final String COLLECTION = "mongo_collection";
   private static final String AUTH_DB = "mongo_auth_collection";
 
-  /** */
+  /**
+   * Bill Pugh Singleton pattern - thread-safe lazy initialization without synchronization overhead.
+   * The inner class is not loaded until getInstance() is called.
+   */
+  private static class SingletonHolder {
+    private static final MongoDbSessionService INSTANCE = new MongoDbSessionService();
+  }
 
-  /** Create connection to the Mongo DB , By fetching the details from Environment */
-  public MongoDbSessionService() {
-    String userName = System.getenv(USERNAME);
-    String password = System.getenv(PASSWORD);
-    String authDB = System.getenv(AUTH_DB);
-    String host = System.getenv(HOST);
-    Integer port = Integer.parseInt(System.getenv(PORT));
+  /**
+   * Returns the singleton instance of MongoDbSessionService.
+   * The instance is lazily initialized on first access in a thread-safe manner.
+   *
+   * @return the singleton instance
+   */
+  public static MongoDbSessionService getInstance() {
+    return SingletonHolder.INSTANCE;
+  }
 
-    MongoCredential credential =
-        MongoCredential.createCredential(userName, authDB, password.toCharArray());
-    MongoClientSettings settings =
-        MongoClientSettings.builder()
-            .applyToClusterSettings(
-                builder -> builder.hosts(Collections.singletonList(new ServerAddress(host, port))))
-            .credential(credential)
-            .build();
-    mongoClient = MongoClients.create(settings);
+  /** Create connection to the Mongo DB, by fetching the details from Environment */
+  private MongoDbSessionService() {
+    initializeMongoClient();
+  }
+
+  /**
+   * Initializes the static MongoClient if not already created.
+   * Uses double-checked locking for thread-safe lazy initialization.
+   */
+  private static void initializeMongoClient() {
+    // Double-checked locking for thread-safe singleton connection
+    if (mongoClient == null) {
+      synchronized (lock) {
+        if (mongoClient == null) {
+          String userName = System.getenv(USERNAME);
+          String password = System.getenv(PASSWORD);
+          String authDB = System.getenv(AUTH_DB);
+          String host = System.getenv(HOST);
+          Integer port = Integer.parseInt(System.getenv(PORT));
+          MongoClientSettings settings;
+          // If the mongo doesn't have any authentication
+          if (userName == null || password == null || authDB == null) {
+            settings =
+                MongoClientSettings.builder()
+                    .applyToClusterSettings(
+                        builder ->
+                            builder.hosts(Collections.singletonList(new ServerAddress(host, port))))
+                    .build();
+          } else {
+            MongoCredential credential =
+                MongoCredential.createCredential(userName, authDB, password.toCharArray());
+            settings =
+                MongoClientSettings.builder()
+                    .applyToClusterSettings(
+                        builder ->
+                            builder.hosts(Collections.singletonList(new ServerAddress(host, port))))
+                    .credential(credential)
+                    .build();
+          }
+          mongoClient = MongoClients.create(settings);
+          logger.info("MongoClient singleton connection created to {}:{}", host, port);
+        } else {
+          logger.info("MongoClient already initialized, reusing existing connection");
+        }
+      }
+    }
   }
 
   /**
@@ -73,20 +121,20 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
     String db = System.getenv(DB);
     String collection = System.getenv(COLLECTION);
     Document document =
-        this.mongoClient
+        mongoClient
             .getDatabase(db)
             .getCollection(collection)
             .find(Filters.eq("id", sessionId))
             .first();
     if (document == null) {
       Document dbObject = Document.parse(session);
-      this.mongoClient.getDatabase(db).getCollection(collection).insertOne(dbObject);
+      mongoClient.getDatabase(db).getCollection(collection).insertOne(dbObject);
       System.out.println("saved");
     } else {
       Document dbObject = Document.parse(session);
       Document filter = new Document("_id", document.get("_id"));
       Document update = new Document("$set", dbObject);
-      this.mongoClient.getDatabase(db).getCollection(collection).updateOne(filter, update);
+      mongoClient.getDatabase(db).getCollection(collection).updateOne(filter, update);
     }
   }
 
@@ -102,7 +150,7 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
     String db = System.getenv(DB);
     String collection = System.getenv(COLLECTION);
     Document document =
-        this.mongoClient
+        mongoClient
             .getDatabase(db)
             .getCollection(collection)
             .find(Filters.eq("id", id))
@@ -110,16 +158,17 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
     if (document != null) {
       JSONObject session = new JSONObject(document.toJson());
       session.remove("_id");
-      for (int i = 0; session.getJSONArray("events").length() > i; i++) {
-        String timestamp =
-            session
-                .getJSONArray("events")
-                .getJSONObject(i)
-                .getJSONObject("timestamp")
-                .getString("$numberLong");
-        session.getJSONArray("events").getJSONObject(i).remove("timestamp");
-        session.getJSONArray("events").getJSONObject(i).put("timestamp", timestamp);
-      }
+      // Already in our mongo timestamp is in epoch milli format
+      //      for (int i = 0; session.getJSONArray("events").length() > i; i++) {
+      //        String timestamp =
+      //            session
+      //                .getJSONArray("events")
+      //                .getJSONObject(i)
+      //                .getJSONObject("timestamp")
+      //                .getString("$numberLong");
+      //        session.getJSONArray("events").getJSONObject(i).remove("timestamp");
+      //        session.getJSONArray("events").getJSONObject(i).put("timestamp", timestamp);
+      //      }
       return session;
     } else return null;
   }
@@ -132,7 +181,7 @@ public class MongoDbSessionService implements BaseSessionService, AutoCloseable 
   private void deleteSession(String sessionId) {
     String db = System.getenv(DB);
     String collection = System.getenv(COLLECTION);
-    this.mongoClient
+    mongoClient
         .getDatabase(db)
         .getCollection(collection)
         .deleteOne(Filters.eq("id", sessionId));
