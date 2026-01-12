@@ -17,7 +17,6 @@ package com.google.adk.events;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
-import com.google.adk.tools.ToolConfirmation;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.genai.types.Part;
 import java.util.Objects;
@@ -41,6 +40,7 @@ public class EventActions {
   private ConcurrentMap<String, ToolConfirmation> requestedToolConfirmations =
       new ConcurrentHashMap<>();
   private Optional<Boolean> endInvocation = Optional.empty();
+  private Optional<EventCompaction> compaction = Optional.empty();
 
   /** Default constructor for Jackson. */
   public EventActions() {}
@@ -139,6 +139,15 @@ public class EventActions {
     this.endInvocation = Optional.of(endInvocation);
   }
 
+  @JsonProperty("compaction")
+  public Optional<EventCompaction> compaction() {
+    return compaction;
+  }
+
+  public void setCompaction(Optional<EventCompaction> compaction) {
+    this.compaction = compaction;
+  }
+
   public static Builder builder() {
     return new Builder();
   }
@@ -162,7 +171,8 @@ public class EventActions {
         && Objects.equals(escalate, that.escalate)
         && Objects.equals(requestedAuthConfigs, that.requestedAuthConfigs)
         && Objects.equals(requestedToolConfirmations, that.requestedToolConfirmations)
-        && Objects.equals(endInvocation, that.endInvocation);
+        && Objects.equals(endInvocation, that.endInvocation)
+        && Objects.equals(compaction, that.compaction);
   }
 
   @Override
@@ -175,7 +185,8 @@ public class EventActions {
         escalate,
         requestedAuthConfigs,
         requestedToolConfirmations,
-        endInvocation);
+        endInvocation,
+        compaction);
   }
 
   /** Builder for {@link EventActions}. */
@@ -190,6 +201,7 @@ public class EventActions {
     private ConcurrentMap<String, ToolConfirmation> requestedToolConfirmations =
         new ConcurrentHashMap<>();
     private Optional<Boolean> endInvocation = Optional.empty();
+    private Optional<EventCompaction> compaction = Optional.empty();
 
     public Builder() {}
 
@@ -203,6 +215,7 @@ public class EventActions {
       this.requestedToolConfirmations =
           new ConcurrentHashMap<>(eventActions.requestedToolConfirmations());
       this.endInvocation = eventActions.endInvocation();
+      this.compaction = eventActions.compaction();
     }
 
     @CanIgnoreReturnValue
@@ -263,6 +276,13 @@ public class EventActions {
     }
 
     @CanIgnoreReturnValue
+    @JsonProperty("compaction")
+    public Builder compaction(EventCompaction value) {
+      this.compaction = Optional.ofNullable(value);
+      return this;
+    }
+
+    @CanIgnoreReturnValue
     public Builder merge(EventActions other) {
       if (other.skipSummarization().isPresent()) {
         this.skipSummarization = other.skipSummarization();
@@ -288,6 +308,9 @@ public class EventActions {
       if (other.endInvocation().isPresent()) {
         this.endInvocation = other.endInvocation();
       }
+      if (other.compaction().isPresent()) {
+        this.compaction = other.compaction();
+      }
       return this;
     }
 
@@ -301,6 +324,7 @@ public class EventActions {
       eventActions.setRequestedAuthConfigs(this.requestedAuthConfigs);
       eventActions.setRequestedToolConfirmations(this.requestedToolConfirmations);
       eventActions.setEndInvocation(this.endInvocation);
+      eventActions.setCompaction(this.compaction);
       return eventActions;
     }
   }
